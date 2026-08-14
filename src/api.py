@@ -3,8 +3,14 @@ FastAPI scoring endpoint -- the deployable interface for the champion PD
 model, wired through the same decision threshold and compliant
 explainability pipeline built in Phases 4-5.
 
-Run with: uvicorn api:app --reload --app-dir src
-Docs at:  http://127.0.0.1:8000/docs
+Local run:  uvicorn api:app --reload --app-dir src
+Docs at:    http://127.0.0.1:8000/docs
+
+Deployment: see DEPLOYMENT.md in the project root. Reads $PORT from the
+environment (set automatically by Render/Railway/Fly.io) and allows CORS
+from any origin by default -- fine for a public portfolio demo scoring
+synthetic/example applicants; tighten CORS_ALLOW_ORIGINS if this is ever
+used for anything sensitive.
 """
 import sys
 import os
@@ -12,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import features
@@ -21,6 +28,11 @@ import explainability as ex
 THRESHOLD = 0.430  # the validated, real-dollar profit-maximizing threshold (Phase 4)
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                            "data", "processed", "champion_model_calibrated.joblib")
+
+# Comma-separated list of allowed origins, e.g. "https://yourname.github.io".
+# Defaults to "*" (any origin) -- appropriate for a public demo endpoint
+# that only scores example applicant data, not real customer information.
+CORS_ALLOW_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "*")
 
 FEATURE_COLS = [
     "loan_amnt", "int_rate", "installment", "grade", "sub_grade",
@@ -36,15 +48,29 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[CORS_ALLOW_ORIGINS] if CORS_ALLOW_ORIGINS != "*" else ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _champion = None
-_background = None
 
 
 def get_champion():
     """Lazy-load the model on first request rather than at import time --
-    keeps module import fast and testable without a real model file present."""
+    keeps module import fast and testable without a real model file present,
+    and avoids a slow cold-start on every deployment health check."""
     global _champion
     if _champion is None:
+        if not os.path.exists(MODEL_PATH):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Model artifact not found at {MODEL_PATH}. Ensure "
+                       f"data/processed/champion_model_calibrated.joblib is included "
+                       f"in the deployed repository.",
+            )
         _champion = joblib.load(MODEL_PATH)
     return _champion
 
@@ -92,6 +118,16 @@ class ScoreResponse(BaseModel):
     reason_codes: list[str] = []
     adverse_action_letter: str | None = None
     unmapped_features_flagged_for_review: list[str] = []
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "Credit Expansion Engine -- Scoring API",
+        "docs": "/docs",
+        "health": "/health",
+        "score_endpoint": "POST /score",
+    }
 
 
 @app.get("/health")
@@ -158,3 +194,11 @@ def _approximate_feature_contributions(row: pd.Series):
         else:
             contributions.append(0)
     return np.array(contributions, dtype=float)
+
+
+if __name__ == "__main__":
+    # Convenience entry point for platforms that run `python api.py` directly
+    # (e.g. Railway's auto-detection) rather than an explicit uvicorn command.
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
