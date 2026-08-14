@@ -26,6 +26,18 @@ import features
 import explainability as ex
 
 THRESHOLD = 0.430  # the validated, real-dollar profit-maximizing threshold (Phase 4)
+
+# Business-rule overlay, separate from the statistical model: LendingClub's
+# own "dti" field reflects EXISTING debt only, by definition -- it never
+# includes the loan currently being requested. That means nothing in the
+# model's 19 features directly checks whether THIS SPECIFIC loan's payment
+# is affordable against THIS SPECIFIC income. A logistic regression summing
+# many "looks fine" signals can approve a request where the new payment
+# alone would exceed the applicant's entire income, if other features
+# outweigh it (found via a live test: $2,000 income, still approved).
+# Real underwriting commonly layers hard affordability rules like this one
+# on top of a statistical score for exactly this reason.
+PAYMENT_TO_INCOME_CEILING = 0.50
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                            "data", "processed", "champion_model_calibrated.joblib")
 
@@ -144,7 +156,13 @@ def score(applicant: Applicant):
     X = engineered[FEATURE_COLS]
 
     pd_estimate = float(champion.predict_proba(X)[0, 1])
-    decision = "Approved" if pd_estimate < THRESHOLD else "Declined"
+    model_decision = "Approved" if pd_estimate < THRESHOLD else "Declined"
+
+    annual_payment = applicant.installment * 12
+    payment_to_income = annual_payment / applicant.annual_inc if applicant.annual_inc > 0 else float("inf")
+    affordability_override = payment_to_income > PAYMENT_TO_INCOME_CEILING
+
+    decision = "Declined" if affordability_override else model_decision
 
     response = ScoreResponse(
         calibrated_pd=round(pd_estimate, 4),
@@ -153,20 +171,37 @@ def score(applicant: Applicant):
     )
 
     if decision == "Declined":
-        # Real-time SHAP for a single request: a lightweight, fast
-        # approximation is used rather than the full permutation explainer
-        # from Phase 5 (which needs a background sample and is too slow
-        # for interactive per-request latency). Production deployment would
-        # cache SHAP background data and warm the explainer at startup --
-        # noted as a scaling consideration, not implemented here.
-        codes, unmapped = ex.map_shap_to_reason_codes(
-            _approximate_feature_contributions(X.iloc[0]), FEATURE_COLS, n_reasons=3
-        )
-        response.reason_codes = [f"{c.code}: {c.approved_text}" for c in codes]
-        response.adverse_action_letter = ex.generate_adverse_action_letter(
-            "API-REQUEST", decision, codes
-        )
-        response.unmapped_features_flagged_for_review = unmapped
+        if affordability_override and model_decision == "Approved":
+            # The model itself would have approved this -- the decline comes
+            # entirely from the affordability business rule, not from SHAP.
+            # Reported separately and honestly rather than dressed up as a
+            # model-driven reason it isn't.
+            response.reason_codes = [
+                f"R13: This loan's payment (${annual_payment:,.0f}/year) would be "
+                f"{payment_to_income:.0%} of stated annual income -- exceeds the "
+                f"{PAYMENT_TO_INCOME_CEILING:.0%} affordability threshold (business-rule "
+                f"override; the statistical model alone would have approved this application)"
+            ]
+            response.adverse_action_letter = ex.generate_adverse_action_letter(
+                "API-REQUEST", decision, [ex.ReasonCode(
+                    "R13", "Requested payment is unaffordable relative to reported income"
+                )]
+            )
+        else:
+            # Real-time SHAP for a single request: a lightweight, fast
+            # approximation is used rather than the full permutation explainer
+            # from Phase 5 (which needs a background sample and is too slow
+            # for interactive per-request latency). Production deployment would
+            # cache SHAP background data and warm the explainer at startup --
+            # noted as a scaling consideration, not implemented here.
+            codes, unmapped = ex.map_shap_to_reason_codes(
+                _approximate_feature_contributions(X.iloc[0]), FEATURE_COLS, n_reasons=3
+            )
+            response.reason_codes = [f"{c.code}: {c.approved_text}" for c in codes]
+            response.adverse_action_letter = ex.generate_adverse_action_letter(
+                "API-REQUEST", decision, codes
+            )
+            response.unmapped_features_flagged_for_review = unmapped
 
     return response
 
