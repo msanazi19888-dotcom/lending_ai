@@ -1,0 +1,12 @@
+# Minimal dependency set for deploying ONLY the scoring API (src/api.py),
+# not the full modeling pipeline. Keeps deployment builds fast and small.
+# The full project's requirements.txt (used for local development/training)
+# has many more packages this deployment doesn't need.
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+numpy
+scikit-learn
+joblib
+shap
