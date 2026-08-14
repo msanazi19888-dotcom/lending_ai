@@ -76,23 +76,23 @@ def get_champion():
 
 
 class Applicant(BaseModel):
-    loan_amnt: float = Field(..., gt=0, le=40000, description="Requested loan amount (LendingClub's real range tops out around $40,000 — the model has no basis to extrapolate meaningfully beyond that)")
+    loan_amnt: float = Field(..., gt=0, description="Requested loan amount")
     int_rate: float = Field(..., ge=0, le=40, description="Contractual APR, percent")
-    installment: float = Field(..., gt=0)
+    installment: float = Field(..., gt=0, le=2000, description="Monthly payment")
     grade: str
     sub_grade: str
     home_ownership: str
-    annual_inc: float = Field(..., ge=0, le=1000000, description="Self-reported gross annual income")
+    annual_inc: float = Field(..., ge=0)
     verification_status: str
     purpose: str
     dti: float = Field(..., ge=0, le=100)
-    delinq_2yrs: int = Field(..., ge=0)
-    inq_last_6mths: int = Field(..., ge=0)
-    open_acc: int = Field(..., ge=0)
-    pub_rec: int = Field(..., ge=0)
-    revol_bal: float = Field(..., ge=0)
+    delinq_2yrs: int = Field(..., ge=0, le=20)
+    inq_last_6mths: int = Field(..., ge=0, le=20)
+    open_acc: int = Field(..., ge=0, le=50)
+    pub_rec: int = Field(..., ge=0, le=10)
+    revol_bal: float = Field(..., ge=0, le=500000)
     revol_util: float = Field(..., ge=0, le=150)
-    total_acc: int = Field(..., ge=0)
+    total_acc: int = Field(..., ge=0, le=100)
     emp_length: str = Field(..., description="e.g. '< 1 year', '5 years', '10+ years'")
     fico_range_low: float = Field(..., ge=300, le=850)
     fico_range_high: float = Field(..., ge=300, le=850)
