@@ -76,13 +76,13 @@ def get_champion():
 
 
 class Applicant(BaseModel):
-    loan_amnt: float = Field(..., gt=0, description="Requested loan amount")
+    loan_amnt: float = Field(..., gt=0, le=40000, description="Requested loan amount (LendingClub's real range tops out around $40,000 — the model has no basis to extrapolate meaningfully beyond that)")
     int_rate: float = Field(..., ge=0, le=40, description="Contractual APR, percent")
     installment: float = Field(..., gt=0)
     grade: str
     sub_grade: str
     home_ownership: str
-    annual_inc: float = Field(..., ge=0)
+    annual_inc: float = Field(..., ge=0, le=1000000, description="Self-reported gross annual income")
     verification_status: str
     purpose: str
     dti: float = Field(..., ge=0, le=100)
