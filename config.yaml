@@ -1,0 +1,151 @@
+# Central configuration for the pipeline. Keeping these out of code so
+# thresholds/costs can be revisited without touching pipeline logic.
+
+data:
+  raw_accepted_path: "data/raw/accepted_loans.csv"
+  raw_rejected_path: "data/raw/rejected_loans.csv"
+  processed_dir: "data/processed"
+
+# Fields known to leak post-origination outcome information.
+# These must NEVER be used as model features — they wouldn't be known
+# at the time of an actual approve/decline decision.
+leakage_fields:
+  - total_pymnt
+  - total_pymnt_inv
+  - total_rec_prncp
+  - total_rec_int
+  - total_rec_late_fee
+  - recoveries
+  - collection_recovery_fee
+  - last_pymnt_d
+  - last_pymnt_amnt
+  - next_pymnt_d
+  - last_credit_pull_d
+  - out_prncp
+  - out_prncp_inv
+  - hardship_flag
+  - debt_settlement_flag
+  - settlement_status
+  # Added after inspecting the real Kaggle schema (Phase 1, step 1) --
+  # these weren't in the original guessed list but are clearly
+  # post-origination information.
+  - last_fico_range_high      # FICO re-pulled after issuance, not at application
+  - last_fico_range_low
+  - hardship_type
+  - hardship_reason
+  - hardship_status
+  - deferral_term
+  - hardship_amount
+  - hardship_start_date
+  - hardship_end_date
+  - payment_plan_start_date
+  - hardship_length
+  - hardship_dpd
+  - hardship_loan_status
+  - orig_projected_additional_accrued_interest
+  - hardship_payoff_balance_amount
+  - hardship_last_payment_amount
+  - debt_settlement_flag_date
+  - settlement_date
+  - settlement_amount
+  - settlement_percentage
+  - settlement_term
+
+# Identifier / free-text fields: not leakage in the temporal sense, but
+# not usable model features either (unique IDs, free text, URLs).
+identifier_fields:
+  - id
+  - member_id
+  - url
+  - desc
+  - emp_title
+  - title
+  - funded_amnt        # near-duplicate of loan_amnt, set at origination decision time --
+  - funded_amnt_inv    # excluded to avoid redundancy, not because it leaks the future
+
+# Terminal loan statuses that define the modeling population.
+# Loans still "Current" have no known outcome yet and must be excluded.
+# The "Does not meet the credit policy" variants are loans originated
+# under an older, since-revised LendingClub underwriting policy -- their
+# outcome is real and known, so they're included, but this is documented
+# as a limitation (see README Phase 1).
+terminal_statuses:
+  good: ["Fully Paid", "Does not meet the credit policy. Status:Fully Paid"]
+  bad: ["Charged Off", "Default", "Does not meet the credit policy. Status:Charged Off"]
+
+split:
+  # Time-based split: train on earlier vintages, validate/test on later ones.
+  # More honest than a random split for a model meant to generalize forward in time.
+  train_end_year: 2013
+  calib_end_year: 2014
+  test_start_year: 2015
+
+modeling_scope:
+  # Phase 1 finding: this dataset's snapshot date (loans issued through
+  # Dec-2018) is EARLIER than the natural maturity date of many loans,
+  # especially 60-month loans and anything issued after ~2015 for even
+  # a 36-month term. A loan showing "Fully Paid" from an immature vintage
+  # got there via early payoff -- a biased, non-representative subset of
+  # good borrowers -- while "Charged Off" can occur at any point in a
+  # loan's life and isn't subject to the same bias. Modeling an immature
+  # population without correcting for this would bias the model.
+  #
+  # Scope decision: restrict to 36-month loans issued 2007-2015 (matured
+  # by the Dec-2018 snapshot). 60-month loans and 2016-2018 vintages are
+  # excluded from Phases 2-4, not because they're less valuable, but
+  # because properly using them requires survival/time-to-default
+  # modeling (censoring-aware), which is out of scope for the core PD
+  # model and flagged as a real future extension (see README).
+  term_filter: "36 months"
+  max_issue_year: 2015
+
+cost_matrix:
+  # Placeholder ratios — to be re-derived from actual Lending Club
+  # loss-given-default and interest-margin data in Phase 4.
+  false_negative_cost: 5   # approving a loan that defaults
+  false_positive_cost: 1   # declining an applicant who would have repaid
+
+reject_inference:
+  # Both methods are fit and compared; see src/reject_inference.py.
+  # Selection bias correction is the core justification for trusting the
+  # Phase 3 "safe to approve" business case at all — a model trained only
+  # on accepts and applied to declines without this step conflates the
+  # bank's original accept/decline policy with the applicant's true risk.
+  methods: ["fuzzy_augmentation", "heckman_two_stage"]
+  selection_bias_flag_threshold: 0.10  # |Mills ratio coefficient| above which
+
+model_risk_management:
+  # Effective April 17, 2026, SR 26-2 (Revised Guidance on Model Risk
+  # Management) supersedes SR 11-7 and SR 21-8. Referenced throughout the
+  # project's documentation instead of SR 11-7.
+  guidance: "SR 26-2"
+  supersedes: ["SR 11-7 (2011)", "SR 21-8 (2021)"]
+  effective_date: "2026-04-17"
+  notes: >
+    SR 26-2 scales expectations to institution size/complexity/risk profile
+    (formally applicable to institutions >$30B in assets — a limitation to
+    state explicitly, since this is a portfolio project, not an actual
+    regulated institution). It also tightens the three-part definition of
+    "model" and explicitly places generative/agentic AI systems outside its
+    scope, directing institutions to separate governance principles for
+    those — relevant if an LLM-based letter-drafting layer is added on top
+    of the SHAP reason codes in explainability.py.
+
+fairness:
+  # No direct protected-class fields in this dataset; proxy checks only,
+  # documented as a limitation (see README Phase 5).
+  proxy_fields: ["addr_state", "zip_code"]
+  four_fifths_threshold: 0.8
+
+adverse_action:
+  # CFPB Circular 2026-03 (May 2026) reaffirms the substance of the
+  # withdrawn 2022-03/2023-03 circulars: a complex algorithm does not
+  # excuse specific, accurate principal reasons for adverse action.
+  # Underlying binding requirement: ECOA / Regulation B, 12 CFR 1002.9 --
+  # the taxonomy design targets the statute, not the circular number,
+  # since circular guidance in this area has already been withdrawn and
+  # reissued once.
+  guidance: "CFPB Circular 2026-03"
+  legal_basis: "ECOA Sec. 701(d); Regulation B, 12 CFR 1002.9"
+  architecture: "SHAP -> validated feature mapping -> approved reason-code taxonomy -> plain-language explanation"
+  genai_scope: "wording/tone polish of already-approved deterministic text only; never generates reasons; output validated post-hoc, fail-safe to deterministic text on validation failure"

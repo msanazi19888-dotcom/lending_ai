@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Raw data is too large for git and isn't needed for deployment
+data/raw/
+
+# Only the trained model is needed for deployment — exclude everything
+# else in processed/ (large parquet files, etc.)
+data/processed/*
+!data/processed/champion_model_calibrated.joblib
+
+# Local output logs, not part of the actual project
+phase*_output*.txt
+*.log
