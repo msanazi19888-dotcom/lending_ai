@@ -16,11 +16,13 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from typing import Literal
+
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import features
 import explainability as ex
@@ -52,6 +54,31 @@ FEATURE_COLS = [
     "dti", "delinq_2yrs", "inq_last_6mths", "open_acc", "pub_rec",
     "revol_bal", "revol_util", "total_acc", "emp_length_years", "fico_midpoint",
 ]
+
+# Standard, publicly documented LendingClub category taxonomy -- these are
+# the values the champion model's OneHotEncoder actually learned during
+# training. Deliberately NOT left as free-text `str` fields: found via a
+# live test that OneHotEncoder(handle_unknown="ignore") does not error on
+# an unrecognized category -- it silently zeroes it out and still returns
+# a confident-looking prediction for input the model never learned to
+# interpret (confirmed with a garbage grade value and an XSS-style string
+# in purpose; both produced a normal-looking 0.0000 PD with no error at
+# all). That's a worse failure mode than crashing, since nothing signals
+# anything went wrong. Constraining these to Literal types rejects anything
+# outside the real, trained category set with a clear validation error
+# instead.
+_SUB_GRADES = tuple(f"{g}{n}" for g in "ABCDEFG" for n in range(1, 6))
+_EMP_LENGTHS = ("< 1 year", "1 year", *[f"{n} years" for n in range(2, 10)], "10+ years")
+Grade = Literal["A", "B", "C", "D", "E", "F", "G"]
+SubGrade = Literal[_SUB_GRADES]
+HomeOwnership = Literal["RENT", "OWN", "MORTGAGE", "OTHER", "NONE", "ANY"]
+VerificationStatus = Literal["Verified", "Source Verified", "Not Verified"]
+Purpose = Literal[
+    "debt_consolidation", "credit_card", "home_improvement", "major_purchase",
+    "small_business", "car", "medical", "moving", "vacation", "house",
+    "wedding", "renewable_energy", "educational", "other",
+]
+EmpLength = Literal[_EMP_LENGTHS]
 
 app = FastAPI(
     title="Credit Expansion Engine -- Scoring API",
@@ -88,15 +115,15 @@ def get_champion():
 
 
 class Applicant(BaseModel):
-    loan_amnt: float = Field(..., gt=0, description="Requested loan amount")
+    loan_amnt: float = Field(..., gt=0, le=40000, description="Requested loan amount (LendingClub's real range tops out around $40,000 — the model has no basis to extrapolate meaningfully beyond that)")
     int_rate: float = Field(..., ge=0, le=40, description="Contractual APR, percent")
     installment: float = Field(..., gt=0, le=2000, description="Monthly payment")
-    grade: str
-    sub_grade: str
-    home_ownership: str
-    annual_inc: float = Field(..., ge=0)
-    verification_status: str
-    purpose: str
+    grade: Grade
+    sub_grade: SubGrade
+    home_ownership: HomeOwnership
+    annual_inc: float = Field(..., ge=0, le=1000000, description="Self-reported gross annual income")
+    verification_status: VerificationStatus
+    purpose: Purpose
     dti: float = Field(..., ge=0, le=100)
     delinq_2yrs: int = Field(..., ge=0, le=20)
     inq_last_6mths: int = Field(..., ge=0, le=20)
@@ -105,9 +132,24 @@ class Applicant(BaseModel):
     revol_bal: float = Field(..., ge=0, le=500000)
     revol_util: float = Field(..., ge=0, le=150)
     total_acc: int = Field(..., ge=0, le=100)
-    emp_length: str = Field(..., description="e.g. '< 1 year', '5 years', '10+ years'")
+    emp_length: EmpLength = Field(..., description="e.g. '< 1 year', '5 years', '10+ years'")
     fico_range_low: float = Field(..., ge=300, le=850)
     fico_range_high: float = Field(..., ge=300, le=850)
+
+    @model_validator(mode="after")
+    def _fico_range_is_logically_ordered(self):
+        # The frontend always computes fico_range_high = low + 4 and can
+        # never produce an inverted pair -- but the API is public, and
+        # anyone calling it directly could send fico_range_high < low,
+        # which is logically backwards (LendingClub always reports these
+        # as an ordered low-high pair). Caught here rather than silently
+        # accepted and fed into feature engineering as nonsense.
+        if self.fico_range_high < self.fico_range_low:
+            raise ValueError(
+                f"fico_range_high ({self.fico_range_high}) cannot be less than "
+                f"fico_range_low ({self.fico_range_low})"
+            )
+        return self
 
     class Config:
         json_schema_extra = {
